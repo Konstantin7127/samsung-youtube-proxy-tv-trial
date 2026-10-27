@@ -1,0 +1,14 @@
+{
+  "name": "samsung-youtube-proxy-tv-trial",
+  "version": "0.4.0-test.1",
+  "private": true,
+  "description": "Unpublished TV trial module with volatile proxy credentials",
+  "appName": "YouTube Proxy TV Trial",
+  "packageType": "app",
+  "appPath": "bootstrap.html",
+  "serviceFile": "dist/service.js",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "license": "GPL-3.0-only"
+}

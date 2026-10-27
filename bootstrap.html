@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube Proxy: испытание</title>
+  <style>
+    body { background:#111; color:#eee; font:28px sans-serif; margin:8vw; }
+    p { max-width: 38em; line-height:1.4; }
+    small { color:#aaa; }
+  </style>
+</head>
+<body>
+  <h1>YouTube Proxy</h1>
+  <p id="status">Ожидание локального сервиса…</p>
+  <small>Тестовый модуль. Не входите в учётную запись YouTube.</small>
+  <script>
+    (function () {
+      var endpoint = 'http://127.0.0.1:8113/health';
+      var attempts = 0;
+      function poll() {
+        attempts += 1;
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', endpoint, true);
+        xhr.timeout = 2000;
+        xhr.onload = function () {
+          if (xhr.status === 200) {
+            try {
+              if (JSON.parse(xhr.responseText).ready) {
+                window.location.replace('http://127.0.0.1:8114/');
+                return;
+              }
+            } catch (ignored) {}
+          }
+          retry();
+        };
+        xhr.onerror = retry;
+        xhr.ontimeout = retry;
+        xhr.send();
+      }
+      function retry() {
+        if (attempts >= 30) {
+          document.getElementById('status').textContent =
+            'Сервис не запустился. Вернитесь в TizenBrew и проверьте статус модуля.';
+          return;
+        }
+        setTimeout(poll, 1000);
+      }
+      poll();
+    }());
+  </script>
+</body>
+</html>
