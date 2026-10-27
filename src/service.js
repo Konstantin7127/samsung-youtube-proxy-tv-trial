@@ -10,6 +10,7 @@ var url = require('url');
 var zlib = require('zlib');
 var crypto = require('crypto');
 var BROWSER_ROUTER = /*__BROWSER_ROUTER__*/;
+var SETTINGS_PAGE = /*__SETTINGS_PAGE__*/;
 var DEFAULT_PORT = 8113;
 var DEFAULT_SETTINGS_PORT = 8114;
 var MAX_TEXT = 16 * 1024 * 1024;
@@ -523,51 +524,18 @@ function readJson(request, callback) {
 function settingsHtml(token, configured, stats, relayPort) {
   var status = configured ? 'Прокси включён в памяти сервиса.' :
     'Прокси не настроен. YouTube не будет открыт напрямую.';
-  return '<!doctype html><html lang="ru"><meta charset="utf-8">' +
-    '<title>YouTube Proxy</title><style>body{background:#111;color:#eee;' +
-    'font:24px sans-serif;margin:5vw;max-width:48em}input,select,button{' +
-    'font:inherit;margin:8px;padding:10px}label{display:block}small{color:#aaa}' +
-    '</style><h1>YouTube Proxy — прототип</h1><p id="state">' + status +
-    '</p><p>Туннелей: ' + stats.tunnels + ', ответов 206: ' +
-    stats.partialResponses + ', ошибок: ' + stats.upstreamErrors +
-    ', заблокировано: ' + stats.blockedRequests + '</p>' +
-    '<p>googlevideo: запросов ' + stats.videoRequests +
-    ', Range ' + stats.videoRangeRequests + ', ответов 206 ' +
-    stats.videoPartialResponses + ', байтов ' + stats.videoBytes +
-    ' <button onclick="location.reload()">Обновить</button></p>' +
-    '<p><small>Пока не входите в аккаунт. ' +
-    'Реквизиты хранятся только в памяти, до остановки TizenBrew.</small></p>' +
-    '<p><small>HTTP CONNECT Basic и SOCKS5 с паролем не шифруют ' +
-    'реквизиты на участке до внешнего прокси.</small></p>' +
-    '<label>Тип <select id="type"><option value="http">HTTP CONNECT' +
-    '</option><option value="socks5">SOCKS5</option></select></label>' +
-    '<label>Адрес <input id="host" autocomplete="off"></label>' +
-    '<label>Порт <input id="port" type="number" min="1" max="65535"></label>' +
-    '<label>Логин <input id="username" autocomplete="off" ' +
-    'autocapitalize="none" spellcheck="false"></label>' +
-    '<label>Пароль <input id="password" type="password" ' +
-    'autocomplete="off" autocapitalize="none" ' +
-    'spellcheck="false"></label>' +
-    '<p><button id="enable">Включить</button><button id="disable">Выключить' +
-    '</button><button id="test">Проверить</button></p>' +
-    '<p><a href="http://127.0.0.1:' + relayPort +
-    '/tv">Открыть YouTube TV</a></p>' +
-    '<script>(function(){var token=' + JSON.stringify(token) +
-    ';function post(path,payload){var x=new XMLHttpRequest();x.open("POST",path,true);' +
-    'x.setRequestHeader("Content-Type","application/json");' +
-    'x.setRequestHeader("X-Prototype-Token",token);x.onload=function(){' +
-    'document.getElementById("state").textContent=x.responseText;' +
-    'document.getElementById("password").value="";};' +
-    'x.onerror=function(){document.getElementById("state").textContent=' +
-    '"Ошибка соединения";};x.send(JSON.stringify(payload));}' +
-    'document.getElementById("enable").onclick=function(){post("/api/config",' +
-    '{enabled:true,type:document.getElementById("type").value,' +
-    'host:document.getElementById("host").value,port:document.getElementById("port").value,' +
-    'username:document.getElementById("username").value,' +
-    'password:document.getElementById("password").value});};' +
-    'document.getElementById("disable").onclick=function(){post("/api/config",{enabled:false});};' +
-    'document.getElementById("test").onclick=function(){post("/api/test",{});};' +
-    '}());</script></html>';
+  return SETTINGS_PAGE.replace(/@@STATUS@@/g, status)
+    .replace(/@@TOKEN@@/g, token)
+    .replace(/@@RELAY_PORT@@/g, String(relayPort))
+    .replace(/@@CONFIGURED@@/g, configured ? 'true' : 'false')
+    .replace(/@@TUNNELS@@/g, String(stats.tunnels))
+    .replace(/@@PARTIAL@@/g, String(stats.partialResponses))
+    .replace(/@@ERRORS@@/g, String(stats.upstreamErrors))
+    .replace(/@@BLOCKED@@/g, String(stats.blockedRequests))
+    .replace(/@@VIDEO_REQUESTS@@/g, String(stats.videoRequests))
+    .replace(/@@VIDEO_RANGE@@/g, String(stats.videoRangeRequests))
+    .replace(/@@VIDEO_PARTIAL@@/g, String(stats.videoPartialResponses))
+    .replace(/@@VIDEO_BYTES@@/g, String(stats.videoBytes));
 }
 
 function createService(options) {
@@ -747,7 +715,8 @@ function createService(options) {
     }
     if (pathname === '/health' && request.method === 'GET') {
       return sendJson(response, 200, {
-        ready: true, configured: !!state.proxy, stats: state.stats
+        ready: true, version: '0.4.1-test.1',
+        configured: !!state.proxy, stats: state.stats
       }, { 'Access-Control-Allow-Origin': 'http://127.0.0.1:8081' });
     }
     if (pathname === '/' && request.method === 'GET') {
