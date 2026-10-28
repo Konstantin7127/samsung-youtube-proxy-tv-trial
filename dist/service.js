@@ -10,10 +10,20 @@ var url = require('url');
 var zlib = require('zlib');
 var crypto = require('crypto');
 var BROWSER_ROUTER = "(function () {\n  'use strict';\n\n  // Runs on the local YouTube page. The server also rewrites URL literals in\n  // text responses; this catches URLs built dynamically by page JavaScript.\n  var localBase = 'http://127.0.0.1:8113';\n  var originalFetch = window.fetch;\n  var allowed = [\n    'youtube.com', 'googlevideo.com', 'ytimg.com', 'ggpht.com',\n    'gstatic.com', 'googleapis.com', 'youtube-nocookie.com',\n    'clients1.google.com', 'yt3.googleusercontent.com'\n  ];\n\n  function allowedHost(host) {\n    host = String(host || '').toLowerCase();\n    for (var i = 0; i < allowed.length; i += 1) {\n      if (host === allowed[i] ||\n          host.slice(-(allowed[i].length + 1)) === '.' + allowed[i]) {\n        return true;\n      }\n    }\n    return false;\n  }\n\n  function route(value) {\n    var text = String(value);\n    var parser;\n    if (text.indexOf('https://') !== 0 &&\n        text.indexOf('http://') !== 0 && text.indexOf('//') !== 0) {\n      return text;\n    }\n    parser = document.createElement('a');\n    parser.href = text.indexOf('//') === 0 ? 'https:' + text : text;\n    if (parser.protocol === 'http:' && parser.hostname === '127.0.0.1' &&\n        parser.port === '8113') return text;\n    if ((parser.protocol !== 'https:' && parser.protocol !== 'http:') ||\n        !allowedHost(parser.hostname)) return null;\n    return localBase + '/p/' + parser.hostname.toLowerCase() +\n      (parser.pathname || '/') + parser.search + parser.hash;\n  }\n\n  function copyRequestOptions(input, init) {\n    var options = {\n      method: (init && init.method) || input.method,\n      headers: (init && init.headers) || input.headers,\n      credentials: (init && init.credentials) || input.credentials,\n      mode: (init && init.mode) || input.mode,\n      cache: (init && init.cache) || input.cache,\n      redirect: (init && init.redirect) || input.redirect\n    };\n    return options;\n  }\n\n  if (typeof originalFetch === 'function') {\n    window.fetch = function (input, init) {\n      var target = route(input instanceof Request ? input.url : input);\n      var method;\n      var options;\n      if (target === null) {\n        return Promise.reject(new Error('EXTERNAL_URL_BLOCKED'));\n      }\n      if (!(input instanceof Request)) {\n        return originalFetch.call(this, target, init);\n      }\n      if (target === input.url) return originalFetch.call(this, input, init);\n\n      options = copyRequestOptions(input, init);\n      method = String(options.method || 'GET').toUpperCase();\n      if (init && Object.prototype.hasOwnProperty.call(init, 'body')) {\n        options.body = init.body;\n        return originalFetch.call(this, target, options);\n      }\n      if (method === 'GET' || method === 'HEAD') {\n        return originalFetch.call(this, target, options);\n      }\n      if (input.bodyUsed) {\n        return Promise.reject(new TypeError('Request body already consumed'));\n      }\n\n      // Chromium M63 on Tizen can expose Request.body as undefined even when\n      // the request contains bytes. clone().arrayBuffer() preserves them.\n      return input.clone().arrayBuffer().then(function (buffer) {\n        if (buffer.byteLength > 0) options.body = buffer;\n        return originalFetch.call(window, target, options);\n      });\n    };\n  }\n\n  if (window.XMLHttpRequest) {\n    var originalOpen = XMLHttpRequest.prototype.open;\n    XMLHttpRequest.prototype.open = function (method, url, async, user, pass) {\n      var target = route(url);\n      if (target === null) throw new Error('EXTERNAL_URL_BLOCKED');\n      return originalOpen.call(this, method, target, async, user, pass);\n    };\n  }\n\n  var originalSetAttribute = Element.prototype.setAttribute;\n  Element.prototype.setAttribute = function (name, value) {\n    var lower = String(name).toLowerCase();\n    if (lower === 'src' || lower === 'poster') {\n      value = route(value);\n      if (value === null) value = 'about:blank';\n    }\n    return originalSetAttribute.call(this, name, value);\n  };\n\n  function patchSourceProperty(type) {\n    if (!type || !type.prototype) return;\n    var original = Object.getOwnPropertyDescriptor(type.prototype, 'src');\n    if (!original || !original.configurable || !original.set) return;\n    Object.defineProperty(type.prototype, 'src', {\n      configurable: true,\n      enumerable: original.enumerable,\n      get: original.get,\n      set: function (value) {\n        var target = route(value);\n        original.set.call(this, target === null ? 'about:blank' : target);\n      }\n    });\n  }\n  patchSourceProperty(window.HTMLImageElement);\n  patchSourceProperty(window.HTMLScriptElement);\n  patchSourceProperty(window.HTMLMediaElement);\n  patchSourceProperty(window.HTMLSourceElement);\n}());\n";
-var SETTINGS_PAGE = "<!doctype html>\n<html lang=\"ru\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>YouTube Proxy: настройки</title>\n  <style>\n    body { background:#111; color:#eee; font:21px sans-serif; margin:2.5vw; }\n    h1 { margin:0 0 10px; font-size:30px; }\n    p { margin:8px 0; }\n    small { color:#bbb; }\n    .diag { background:#242424; color:#ddd; padding:10px 16px; max-width:49em; }\n    .nav { background:#174c61; color:#fff; border:0; border-radius:7px;\n      padding:9px 14px; margin:4px 0; min-width:12em; text-align:left; font:inherit; }\n    .nav.selected, .nav:focus { outline:4px solid #00e6ff; background:#126c85; }\n    input { background:#eee; color:#111; border:3px solid #aaa; padding:7px;\n      margin-left:10px; font:inherit; width:16em; }\n    input:focus { border-color:#ffe25d; outline:3px solid #ffe25d; }\n    #port { width:7em; }\n    .row { display:block; }\n    .warning { color:#ffd785; }\n  </style>\n</head>\n<body>\n  <h1>YouTube Proxy — настройки пультом</h1>\n  <p id=\"state\">@@STATUS@@</p>\n  <p>Туннелей: @@TUNNELS@@; ответов 206: @@PARTIAL@@; ошибок: @@ERRORS@@; заблокировано: @@BLOCKED@@.</p>\n  <p>googlevideo: запросов @@VIDEO_REQUESTS@@; Range @@VIDEO_RANGE@@; ответов 206 @@VIDEO_PARTIAL@@; байтов @@VIDEO_BYTES@@.</p>\n  <div class=\"diag\" aria-live=\"polite\">\n    <div id=\"script-status\">JavaScript не запущен или заблокирован.</div>\n    <div id=\"key-status\">keydown: 0; последняя: —</div>\n    <div id=\"no-key-status\">Нажмите стрелку вниз.</div>\n    <div id=\"focus-status\">Выделение не установлено.</div>\n    <div id=\"input-status\">OK на поле открывает экранную клавиатуру.</div>\n  </div>\n  <p><small>Стрелки выбирают элемент, OK открывает поле, Back закрывает ввод или возвращает назад. При вводе IME управляет стрелками.</small></p>\n  <div class=\"row\"><button class=\"nav\" id=\"type-nav\" data-label=\"Тип прокси\" type=\"button\">Тип: HTTP CONNECT</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"host-nav\" data-label=\"Адрес прокси\" type=\"button\">Адрес: ввести</button><input id=\"host\" type=\"text\" data-label=\"адреса\" tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"none\" spellcheck=\"false\"></div>\n  <div class=\"row\"><button class=\"nav\" id=\"port-nav\" data-label=\"Порт прокси\" type=\"button\">Порт: ввести</button><input id=\"port\" type=\"number\" min=\"1\" max=\"65535\" data-label=\"порта\" tabindex=\"-1\" autocomplete=\"off\"></div>\n  <div class=\"row\"><button class=\"nav\" id=\"username-nav\" data-label=\"Логин прокси\" type=\"button\">Логин: ввести</button><input id=\"username\" type=\"text\" data-label=\"логина\" tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"none\" spellcheck=\"false\"></div>\n  <div class=\"row\"><button class=\"nav\" id=\"password-nav\" data-label=\"Пароль прокси\" type=\"button\">Пароль: ввести</button><input id=\"password\" type=\"password\" data-label=\"пароля\" tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"none\" spellcheck=\"false\"></div>\n  <div class=\"row\"><button class=\"nav\" id=\"enable-nav\" data-label=\"Включить прокси\" type=\"button\">Включить прокси</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"disable-nav\" data-label=\"Выключить прокси\" type=\"button\">Выключить прокси</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"test-nav\" data-label=\"Проверить прокси\" type=\"button\">Проверить подключение</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"refresh-nav\" data-label=\"Обновить счётчики\" type=\"button\">Обновить счётчики</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"tv-nav\" data-label=\"Открыть YouTube TV\" type=\"button\">Открыть YouTube TV</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"back-nav\" data-label=\"Назад к проверке пульта\" type=\"button\">Назад к проверке пульта</button></div>\n  <p class=\"warning\">Не входите в Google-аккаунт. Реквизиты остаются только в памяти сервиса до его остановки. HTTP CONNECT Basic и SOCKS5 с паролем не шифруют реквизиты на участке до внешнего прокси.</p>\n  <script>(function (global) {\n  'use strict';\n\n  // ES5 only: the 2019 TV uses an older Chromium engine. Nothing entered in\n  // text fields is copied into diagnostics or a persistent store.\n  function createRemoteNavigation(options) {\n    var ids = options.ids;\n    var items = [];\n    var index = 0;\n    var count = 0;\n    var seconds = 0;\n    var editing = null;\n    var lastKey = '—';\n    var lastEvent = null;\n    var i;\n\n    function element(id) { return document.getElementById(id); }\n    function text(id, value) {\n      var target = element(id);\n      if (target) target.textContent = value;\n    }\n    function keyName(code) {\n      if (code === 37) return 'Влево';\n      if (code === 38) return 'Вверх';\n      if (code === 39) return 'Вправо';\n      if (code === 40) return 'Вниз';\n      if (code === 13) return 'OK';\n      if (code === 10009 || code === 27) return 'Back';\n      if (code === 65376) return 'IME: готово';\n      if (code === 65385) return 'IME: отмена';\n      return 'Другая/IME'; // Never show characters typed into credentials.\n    }\n    function showFocus() {\n      text('focus-status', editing ? 'Ввод: ' + editing.getAttribute('data-label') :\n        'Выбрано: ' + (items[index].getAttribute('data-label') || ids[index]));\n    }\n    function select(next) {\n      if (next < 0) next = items.length - 1;\n      if (next >= items.length) next = 0;\n      index = next;\n      for (var j = 0; j < items.length; j += 1) {\n        if (j === index) {\n          items[j].classList.add('selected');\n          items[j].setAttribute('aria-current', 'true');\n        } else {\n          items[j].classList.remove('selected');\n          items[j].removeAttribute('aria-current');\n        }\n      }\n      if (!editing) items[index].focus();\n      showFocus();\n    }\n    function beginEdit(id) {\n      var field = element(id);\n      if (!field) return;\n      editing = field;\n      field.focus(); // Samsung IME opens when an input receives focus.\n      if (document.activeElement !== field) {\n        editing = null;\n        text('input-status', 'Фокус поля не получен; клавиатура недоступна.');\n        select(index);\n      } else {\n        text('input-status', 'Поле активно. Завершите ввод кнопкой «Готово» или Back.');\n        showFocus();\n      }\n    }\n    function finishEdit() {\n      if (!editing) return;\n      var field = editing;\n      editing = null;\n      field.blur();\n      text('input-status', 'Ввод завершён. Значения не показаны в диагностике.');\n      global.setTimeout(function () { select(index); }, 0);\n    }\n    function keydown(event) {\n      if (lastEvent === event) return; // window capture + body bubble see one key.\n      lastEvent = event;\n      var code = event.keyCode || event.which;\n      count += 1;\n      lastKey = keyName(code);\n      text('key-status', 'keydown: ' + count + '; последняя: ' + lastKey);\n      text('no-key-status', 'События кнопок поступают в страницу.');\n\n      // Give Samsung IME its own arrows and character keys. Never log values.\n      if (editing) {\n        if (code === 65376 || code === 65385) {\n          global.setTimeout(finishEdit, 0);\n        } else if (code === 10009 || code === 27) {\n          finishEdit();\n          event.preventDefault();\n        }\n        return;\n      }\n      if (code === 38 || code === 40) {\n        select(index + (code === 38 ? -1 : 1));\n      } else if (code === 37 || code === 39) {\n        if (!options.onHorizontal || !options.onHorizontal(ids[index], code === 37 ? -1 : 1)) {\n          select(index + (code === 37 ? -1 : 1));\n        }\n      } else if (code === 13) {\n        items[index].click();\n      } else if (code === 10009 || code === 27) {\n        options.onBack();\n      } else {\n        return;\n      }\n      event.preventDefault();\n      event.stopPropagation();\n    }\n\n    for (i = 0; i < ids.length; i += 1) {\n      (function (itemIndex) {\n        var item = element(ids[itemIndex]);\n        if (!item) throw new Error('Missing navigation item: ' + ids[itemIndex]);\n        items.push(item);\n        item.addEventListener('focus', function () {\n          if (!editing) select(itemIndex);\n        });\n        item.addEventListener('click', function () {\n          if (editing) return;\n          select(itemIndex);\n          options.onActivate(ids[itemIndex], api);\n        });\n      }(i));\n    }\n\n    var api = { select: select, beginEdit: beginEdit, finishEdit: finishEdit,\n      getCount: function () { return count; } };\n    if (options.inputIds) {\n      for (i = 0; i < options.inputIds.length; i += 1) {\n        (function (field) {\n          if (!field) throw new Error('Missing input field');\n          field.addEventListener('blur', function () {\n            if (editing !== field) return;\n            editing = null;\n            text('input-status', 'Ввод закрыт. Значения не показаны в диагностике.');\n            global.setTimeout(function () { select(index); }, 0);\n          });\n        }(element(options.inputIds[i])));\n      }\n    }\n    text('script-status', 'JavaScript работает: 0 с');\n    text('key-status', 'keydown: 0; последняя: —');\n    text('no-key-status', 'Нажмите стрелку. Если счётчик останется 0, keydown не поступает.');\n    select(0);\n    global.addEventListener('keydown', keydown, true);\n    if (document.body) document.body.addEventListener('keydown', keydown, false);\n    global.setInterval(function () {\n      seconds += 1;\n      text('script-status', 'JavaScript работает: ' + seconds + ' с');\n      if (count === 0 && seconds >= 8) {\n        text('no-key-status', 'Событий пока нет. Если стрелку уже нажимали, keydown не поступает.');\n      }\n    }, 1000);\n    global.addEventListener('error', function () {\n      text('script-status', 'Ошибка JavaScript на странице (без деталей и реквизитов).');\n    });\n    return api;\n  }\n\n  global.createRemoteNavigation = createRemoteNavigation;\n}(window));\n</script>\n  <script>\n    (function () {\n      var token = '@@TOKEN@@';\n      var relayPort = @@RELAY_PORT@@;\n      var configured = @@CONFIGURED@@;\n      var type = 'http';\n      var nav;\n      function element(id) { return document.getElementById(id); }\n      function setState(message) { element('state').textContent = message; }\n      function clearPassword() { element('password').value = ''; }\n      function safeError(text) {\n        try {\n          var parsed = JSON.parse(text);\n          if (parsed && /^[A-Z0-9_]{1,64}$/.test(parsed.error || '')) return parsed.error;\n        } catch (ignored) {}\n        return 'HTTP_ERROR';\n      }\n      function post(path, payload) {\n        var xhr = new XMLHttpRequest();\n        xhr.open('POST', path, true);\n        xhr.timeout = 15000;\n        xhr.setRequestHeader('Content-Type', 'application/json');\n        xhr.setRequestHeader('X-Prototype-Token', token);\n        xhr.onload = function () {\n          clearPassword();\n          if (xhr.status === 200) {\n            if (path === '/api/config') {\n              configured = !!payload.enabled;\n              setState(configured ? 'Прокси включён в памяти сервиса.' : 'Прокси выключен. YouTube не будет открыт напрямую.');\n            } else {\n              setState('Проверка прошла. Сервер YouTube ответил через прокси.');\n            }\n          } else {\n            setState('Операция не прошла: ' + safeError(xhr.responseText) + ' (HTTP ' + xhr.status + ').');\n          }\n        };\n        xhr.onerror = xhr.ontimeout = function () {\n          clearPassword();\n          setState('Нет ответа локального сервиса. Прокси не считается проверенным.');\n        };\n        xhr.send(JSON.stringify(payload));\n      }\n      function toggleType() {\n        type = type === 'http' ? 'socks5' : 'http';\n        element('type-nav').textContent = 'Тип: ' + (type === 'http' ? 'HTTP CONNECT' : 'SOCKS5');\n      }\n      nav = createRemoteNavigation({\n        ids: ['type-nav', 'host-nav', 'port-nav', 'username-nav', 'password-nav',\n          'enable-nav', 'disable-nav', 'test-nav', 'refresh-nav', 'tv-nav', 'back-nav'],\n        inputIds: ['host', 'port', 'username', 'password'],\n        onHorizontal: function (id) {\n          if (id !== 'type-nav') return false;\n          toggleType();\n          return true;\n        },\n        onActivate: function (id) {\n          if (id === 'type-nav') return toggleType();\n          if (id === 'host-nav') return nav.beginEdit('host');\n          if (id === 'port-nav') return nav.beginEdit('port');\n          if (id === 'username-nav') return nav.beginEdit('username');\n          if (id === 'password-nav') return nav.beginEdit('password');\n          if (id === 'enable-nav') return post('/api/config', {\n            enabled:true, type:type, host:element('host').value,\n            port:element('port').value, username:element('username').value,\n            password:element('password').value\n          });\n          if (id === 'disable-nav') return post('/api/config', { enabled:false });\n          if (id === 'test-nav') return post('/api/test', {});\n          if (id === 'refresh-nav') return location.reload();\n          if (id === 'tv-nav') {\n            if (!configured) return setState('Прокси не настроен. YouTube не будет открыт напрямую.');\n            return location.href = 'http://127.0.0.1:' + relayPort + '/tv';\n          }\n          if (id === 'back-nav') return history.back();\n        },\n        onBack: function () { history.back(); }\n      });\n    }());\n  </script>\n</body>\n</html>\n";
+var SETTINGS_PAGE = "<!doctype html>\n<html lang=\"ru\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>YouTube Proxy: настройки</title>\n  <style>\n    body { background:#111; color:#eee; font:21px sans-serif; margin:2.5vw; }\n    h1 { margin:0 0 10px; font-size:30px; }\n    p { margin:8px 0; }\n    small { color:#bbb; }\n    .diag { background:#242424; color:#ddd; padding:10px 16px; max-width:49em; }\n    .nav { background:#174c61; color:#fff; border:0; border-radius:7px;\n      padding:9px 14px; margin:4px 0; min-width:12em; text-align:left; font:inherit; }\n    .nav.selected, .nav:focus { outline:4px solid #00e6ff; background:#126c85; }\n    input { background:#eee; color:#111; border:3px solid #aaa; padding:7px;\n      margin-left:10px; font:inherit; width:16em; }\n    input:focus { border-color:#ffe25d; outline:3px solid #ffe25d; }\n    #port { width:7em; }\n    .row { display:block; }\n    .warning { color:#ffd785; }\n  </style>\n</head>\n<body>\n  <h1>YouTube Proxy — настройки пультом</h1>\n  <p id=\"state\">@@STATUS@@</p>\n  <p>Туннелей: @@TUNNELS@@; ответов 206: @@PARTIAL@@; ошибок: @@ERRORS@@; заблокировано: @@BLOCKED@@.</p>\n  <p>googlevideo: запросов @@VIDEO_REQUESTS@@; Range @@VIDEO_RANGE@@; ответов 206 @@VIDEO_PARTIAL@@; байтов @@VIDEO_BYTES@@.</p>\n  <p>Проверки: всего @@TEST_ATTEMPTS@@; успешных @@TEST_SUCCESSES@@; ошибок @@TEST_ERRORS@@; отмен @@TEST_CANCELLED@@.</p>\n  <div class=\"diag\" aria-live=\"polite\">\n    <div id=\"script-status\">JavaScript не запущен или заблокирован.</div>\n    <div id=\"key-status\">keydown: 0; последняя: —</div>\n    <div id=\"no-key-status\">Нажмите стрелку вниз.</div>\n    <div id=\"focus-status\">Выделение не установлено.</div>\n    <div id=\"input-status\">OK на поле открывает экранную клавиатуру.</div>\n    <div id=\"test-stage\">Этап: проверка не запущена.</div>\n    <div id=\"test-time\">Время проверки: 0 с.</div>\n  </div>\n  <p><small>Стрелки выбирают элемент, OK открывает поле, Back закрывает ввод или возвращает назад. При вводе IME управляет стрелками.</small></p>\n  <div class=\"row\"><button class=\"nav\" id=\"type-nav\" data-label=\"Тип прокси\" type=\"button\">Тип: HTTP CONNECT</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"host-nav\" data-label=\"Адрес прокси\" type=\"button\">Адрес: ввести</button><input id=\"host\" type=\"text\" data-label=\"адреса\" tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"none\" spellcheck=\"false\"></div>\n  <div class=\"row\"><button class=\"nav\" id=\"port-nav\" data-label=\"Порт прокси\" type=\"button\">Порт: ввести</button><input id=\"port\" type=\"number\" min=\"1\" max=\"65535\" data-label=\"порта\" tabindex=\"-1\" autocomplete=\"off\"></div>\n  <div class=\"row\"><button class=\"nav\" id=\"username-nav\" data-label=\"Логин прокси\" type=\"button\">Логин: ввести</button><input id=\"username\" type=\"text\" data-label=\"логина\" tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"none\" spellcheck=\"false\"></div>\n  <div class=\"row\"><button class=\"nav\" id=\"password-nav\" data-label=\"Пароль прокси\" type=\"button\">Пароль: ввести</button><input id=\"password\" type=\"password\" data-label=\"пароля\" tabindex=\"-1\" autocomplete=\"off\" autocorrect=\"off\" autocapitalize=\"none\" spellcheck=\"false\"></div>\n  <div class=\"row\"><button class=\"nav\" id=\"enable-nav\" data-label=\"Включить прокси\" type=\"button\">Включить прокси</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"disable-nav\" data-label=\"Выключить прокси\" type=\"button\">Выключить прокси</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"test-nav\" data-label=\"Проверить прокси\" type=\"button\">Проверить подключение</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"cancel-nav\" data-label=\"Отменить проверку\" type=\"button\">Отменить проверку</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"refresh-nav\" data-label=\"Обновить счётчики\" type=\"button\">Обновить счётчики</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"tv-nav\" data-label=\"Открыть YouTube TV\" type=\"button\">Открыть YouTube TV</button></div>\n  <div class=\"row\"><button class=\"nav\" id=\"back-nav\" data-label=\"Назад к проверке пульта\" type=\"button\">Назад к проверке пульта</button></div>\n  <p class=\"warning\">Не входите в Google-аккаунт. Реквизиты остаются только в памяти сервиса до его остановки. HTTP CONNECT Basic и SOCKS5 с паролем не шифруют реквизиты на участке до внешнего прокси.</p>\n  <script>(function (global) {\n  'use strict';\n\n  // ES5 only: the 2019 TV uses an older Chromium engine. Nothing entered in\n  // text fields is copied into diagnostics or a persistent store.\n  function createRemoteNavigation(options) {\n    var ids = options.ids;\n    var items = [];\n    var index = 0;\n    var count = 0;\n    var seconds = 0;\n    var editing = null;\n    var lastKey = '—';\n    var lastEvent = null;\n    var i;\n\n    function element(id) { return document.getElementById(id); }\n    function text(id, value) {\n      var target = element(id);\n      if (target) target.textContent = value;\n    }\n    function keyName(code) {\n      if (code === 37) return 'Влево';\n      if (code === 38) return 'Вверх';\n      if (code === 39) return 'Вправо';\n      if (code === 40) return 'Вниз';\n      if (code === 13) return 'OK';\n      if (code === 10009 || code === 27) return 'Back';\n      if (code === 65376) return 'IME: готово';\n      if (code === 65385) return 'IME: отмена';\n      return 'Другая/IME'; // Never show characters typed into credentials.\n    }\n    function showFocus() {\n      text('focus-status', editing ? 'Ввод: ' + editing.getAttribute('data-label') :\n        'Выбрано: ' + (items[index].getAttribute('data-label') || ids[index]));\n    }\n    function select(next) {\n      if (next < 0) next = items.length - 1;\n      if (next >= items.length) next = 0;\n      index = next;\n      for (var j = 0; j < items.length; j += 1) {\n        if (j === index) {\n          items[j].classList.add('selected');\n          items[j].setAttribute('aria-current', 'true');\n        } else {\n          items[j].classList.remove('selected');\n          items[j].removeAttribute('aria-current');\n        }\n      }\n      if (!editing) items[index].focus();\n      showFocus();\n    }\n    function beginEdit(id) {\n      var field = element(id);\n      if (!field) return;\n      editing = field;\n      field.focus(); // Samsung IME opens when an input receives focus.\n      if (document.activeElement !== field) {\n        editing = null;\n        text('input-status', 'Фокус поля не получен; клавиатура недоступна.');\n        select(index);\n      } else {\n        text('input-status', 'Поле активно. Завершите ввод кнопкой «Готово» или Back.');\n        showFocus();\n      }\n    }\n    function finishEdit() {\n      if (!editing) return;\n      var field = editing;\n      editing = null;\n      field.blur();\n      text('input-status', 'Ввод завершён. Значения не показаны в диагностике.');\n      global.setTimeout(function () { select(index); }, 0);\n    }\n    function keydown(event) {\n      if (lastEvent === event) return; // window capture + body bubble see one key.\n      lastEvent = event;\n      var code = event.keyCode || event.which;\n      count += 1;\n      lastKey = keyName(code);\n      text('key-status', 'keydown: ' + count + '; последняя: ' + lastKey);\n      text('no-key-status', 'События кнопок поступают в страницу.');\n\n      // Give Samsung IME its own arrows and character keys. Never log values.\n      if (editing) {\n        if (code === 65376 || code === 65385) {\n          global.setTimeout(finishEdit, 0);\n        } else if (code === 10009 || code === 27) {\n          finishEdit();\n          event.preventDefault();\n        }\n        return;\n      }\n      if (code === 38 || code === 40) {\n        select(index + (code === 38 ? -1 : 1));\n      } else if (code === 37 || code === 39) {\n        if (!options.onHorizontal || !options.onHorizontal(ids[index], code === 37 ? -1 : 1)) {\n          select(index + (code === 37 ? -1 : 1));\n        }\n      } else if (code === 13) {\n        items[index].click();\n      } else if (code === 10009 || code === 27) {\n        options.onBack();\n      } else {\n        return;\n      }\n      event.preventDefault();\n      event.stopPropagation();\n    }\n\n    for (i = 0; i < ids.length; i += 1) {\n      (function (itemIndex) {\n        var item = element(ids[itemIndex]);\n        if (!item) throw new Error('Missing navigation item: ' + ids[itemIndex]);\n        items.push(item);\n        item.addEventListener('focus', function () {\n          if (!editing) select(itemIndex);\n        });\n        item.addEventListener('click', function () {\n          if (editing) return;\n          select(itemIndex);\n          options.onActivate(ids[itemIndex], api);\n        });\n      }(i));\n    }\n\n    var api = { select: select, beginEdit: beginEdit, finishEdit: finishEdit,\n      getCount: function () { return count; } };\n    if (options.inputIds) {\n      for (i = 0; i < options.inputIds.length; i += 1) {\n        (function (field) {\n          if (!field) throw new Error('Missing input field');\n          field.addEventListener('blur', function () {\n            if (editing !== field) return;\n            editing = null;\n            text('input-status', 'Ввод закрыт. Значения не показаны в диагностике.');\n            global.setTimeout(function () { select(index); }, 0);\n          });\n        }(element(options.inputIds[i])));\n      }\n    }\n    text('script-status', 'JavaScript работает: 0 с');\n    text('key-status', 'keydown: 0; последняя: —');\n    text('no-key-status', 'Нажмите стрелку. Если счётчик останется 0, keydown не поступает.');\n    select(0);\n    global.addEventListener('keydown', keydown, true);\n    if (document.body) document.body.addEventListener('keydown', keydown, false);\n    global.setInterval(function () {\n      seconds += 1;\n      text('script-status', 'JavaScript работает: ' + seconds + ' с');\n      if (count === 0 && seconds >= 8) {\n        text('no-key-status', 'Событий пока нет. Если стрелку уже нажимали, keydown не поступает.');\n      }\n    }, 1000);\n    global.addEventListener('error', function () {\n      text('script-status', 'Ошибка JavaScript на странице (без деталей и реквизитов).');\n    });\n    return api;\n  }\n\n  global.createRemoteNavigation = createRemoteNavigation;\n}(window));\n</script>\n  <script>\n    (function () {\n      var token = '@@TOKEN@@';\n      var relayPort = @@RELAY_PORT@@;\n      var configured = @@CONFIGURED@@;\n      var type = 'http';\n      var nav;\n      var testing = false;\n      var testRequest = null;\n      var testTimer = null;\n      var testStarted = 0;\n      var statusPending = false;\n      function element(id) { return document.getElementById(id); }\n      function setState(message) { element('state').textContent = message; }\n      function clearPassword() { element('password').value = ''; }\n      function setStage(value) { element('test-stage').textContent = 'Этап: ' + value + '.'; }\n      function stageName(value) {\n        if (value === 'TCP') return 'TCP-соединение с прокси';\n        if (value === 'AUTH') return 'авторизация прокси';\n        if (value === 'AUTH_CONNECT') return 'авторизация и HTTP CONNECT';\n        if (value === 'CONNECT') return 'CONNECT к YouTube';\n        if (value === 'TLS') return 'проверка TLS';\n        if (value === 'HTTPS') return 'ответ YouTube по HTTPS';\n        return 'ожидание';\n      }\n      function errorMessage(code) {\n        var messages = {\n          INVALID_PROXY_HOST:'Неверный формат адреса прокси.',\n          INVALID_PROXY_PORT:'Неверный номер порта.',\n          PROXY_HOST_UNRESOLVED:'Адрес прокси не найден. Проверьте адрес и DNS.',\n          PROXY_REFUSED:'Сервер отклонил TCP-соединение. Проверьте порт.',\n          PROXY_UNREACHABLE:'Сервер прокси недоступен из сети телевизора.',\n          PROXY_CONNECT_FAILED:'Не удалось подключиться к серверу прокси.',\n          TCP_TIMEOUT:'Истекло время TCP-соединения с прокси.',\n          PROXY_TIMEOUT:'Истекло время TCP-соединения с прокси.',\n          HTTP_PROXY_AUTH_REJECTED:'HTTP-прокси отклонил логин или пароль.',\n          SOCKS_AUTH_FAILED:'SOCKS5-прокси отклонил логин или пароль.',\n          SOCKS_AUTH_REQUIRED:'SOCKS5-прокси не принял способ авторизации.',\n          AUTH_TIMEOUT:'Истекло время авторизации прокси.',\n          HTTP_PROXY_CONNECT_REJECTED:'HTTP CONNECT отклонён прокси.',\n          SOCKS_CONNECT_REJECTED:'SOCKS5 CONNECT отклонён прокси.',\n          CONNECT_TIMEOUT:'Истекло время ответа прокси на CONNECT.',\n          TLS_VERIFICATION_FAILED:'Не прошла проверка TLS-сертификата YouTube.',\n          TLS_TIMEOUT:'Истекло время проверки TLS.',\n          HTTPS_TIMEOUT:'Истекло время ответа YouTube по HTTPS.',\n          YOUTUBE_HTTP_STATUS:'YouTube ответил с ошибкой HTTP.',\n          CHECK_DEADLINE_EXCEEDED:'Превышено общее время проверки.',\n          CHECK_CANCELLED:'Проверка отменена пользователем.',\n          CHECK_ALREADY_RUNNING:'Проверка уже выполняется.',\n          PROXY_NOT_CONFIGURED:'Прокси не настроен.',\n          LOCAL_SERVICE_UNAVAILABLE:'Локальный сервис недоступен.'\n        };\n        return (messages[code] || 'Проверка не прошла.') + ' [' + code + ']';\n      }\n      function safeError(text) {\n        try {\n          var parsed = JSON.parse(text);\n          if (parsed && /^[A-Z0-9_]{1,64}$/.test(parsed.error || '')) return parsed.error;\n        } catch (ignored) {}\n        return 'HTTP_ERROR';\n      }\n      function post(path, payload) {\n        var xhr = new XMLHttpRequest();\n        xhr.open('POST', path, true);\n        xhr.timeout = 15000;\n        xhr.setRequestHeader('Content-Type', 'application/json');\n        xhr.setRequestHeader('X-Prototype-Token', token);\n        xhr.onload = function () {\n          clearPassword();\n          if (xhr.status === 200) {\n            configured = !!payload.enabled;\n            setState(configured ? 'Прокси включён в памяти сервиса.' : 'Прокси выключен. YouTube не будет открыт напрямую.');\n          } else {\n            setState(errorMessage(safeError(xhr.responseText)));\n          }\n        };\n        xhr.onerror = xhr.ontimeout = function () {\n          clearPassword();\n          setState('Нет ответа локального сервиса. Прокси не считается проверенным.');\n        };\n        xhr.send(JSON.stringify(payload));\n      }\n      function cancelServer() {\n        var xhr = new XMLHttpRequest();\n        xhr.open('POST', '/api/test/cancel', true);\n        xhr.timeout = 2000;\n        xhr.setRequestHeader('X-Prototype-Token', token);\n        xhr.onerror = xhr.ontimeout = function () {};\n        xhr.send('{}');\n      }\n      function stopTestUi() {\n        testing = false;\n        clearInterval(testTimer);\n        testTimer = null;\n        testRequest = null;\n      }\n      function pollStage() {\n        var xhr;\n        if (!testing || statusPending) return;\n        statusPending = true;\n        xhr = new XMLHttpRequest();\n        xhr.open('GET', '/api/test/status', true);\n        xhr.timeout = 2000;\n        xhr.setRequestHeader('X-Prototype-Token', token);\n        xhr.onload = function () {\n          statusPending = false;\n          if (!testing || xhr.status !== 200) return;\n          try {\n            var result = JSON.parse(xhr.responseText);\n            if (result.active) setStage(stageName(result.stage));\n          } catch (ignored) {}\n        };\n        xhr.onerror = xhr.ontimeout = function () { statusPending = false; };\n        xhr.send();\n      }\n      function startTest() {\n        var xhr;\n        if (testing) return setState('Проверка уже выполняется.');\n        if (!configured) return setState('Сначала включите прокси.');\n        testing = true;\n        testStarted = Date.now();\n        setState('Проверка соединения. Пульт остаётся доступным.');\n        setStage(stageName('TCP'));\n        element('test-time').textContent = 'Время проверки: 0 с.';\n        testTimer = setInterval(function () {\n          if (!testing) return;\n          element('test-time').textContent = 'Время проверки: ' +\n            Math.floor((Date.now() - testStarted) / 1000) + ' с.';\n          pollStage();\n        }, 1000);\n        xhr = new XMLHttpRequest();\n        testRequest = xhr;\n        xhr.open('POST', '/api/test', true);\n        xhr.timeout = 45000;\n        xhr.setRequestHeader('Content-Type', 'application/json');\n        xhr.setRequestHeader('X-Prototype-Token', token);\n        xhr.onload = function () {\n          var code;\n          if (!testing) return;\n          stopTestUi();\n          if (xhr.status === 200) {\n            setStage('завершено');\n            setState('Проверка прошла: YouTube ответил через прокси.');\n          } else {\n            code = safeError(xhr.responseText);\n            setStage('ошибка');\n            setState(errorMessage(code));\n          }\n        };\n        xhr.onerror = xhr.ontimeout = function () {\n          if (!testing) return;\n          stopTestUi();\n          setStage('сервис недоступен');\n          setState(errorMessage('LOCAL_SERVICE_UNAVAILABLE'));\n          cancelServer();\n        };\n        xhr.send('{}');\n        pollStage();\n      }\n      function cancelTest() {\n        var xhr = testRequest;\n        if (!testing) return setState('Сейчас нет активной проверки.');\n        stopTestUi();\n        if (xhr) xhr.abort();\n        cancelServer();\n        setStage('отменено');\n        setState(errorMessage('CHECK_CANCELLED'));\n      }\n      function toggleType() {\n        type = type === 'http' ? 'socks5' : 'http';\n        element('type-nav').textContent = 'Тип: ' + (type === 'http' ? 'HTTP CONNECT' : 'SOCKS5');\n      }\n      nav = createRemoteNavigation({\n        ids: ['type-nav', 'host-nav', 'port-nav', 'username-nav', 'password-nav',\n          'enable-nav', 'disable-nav', 'test-nav', 'cancel-nav',\n          'refresh-nav', 'tv-nav', 'back-nav'],\n        inputIds: ['host', 'port', 'username', 'password'],\n        onHorizontal: function (id) {\n          if (testing && id === 'type-nav') return true;\n          if (id !== 'type-nav') return false;\n          toggleType();\n          return true;\n        },\n        onActivate: function (id) {\n          if (id === 'cancel-nav') return cancelTest();\n          if (id === 'test-nav') return startTest();\n          if (id === 'back-nav') {\n            if (testing) cancelTest();\n            return history.back();\n          }\n          if (testing) return setState('Проверка идёт. Доступна кнопка «Отменить проверку».');\n          if (id === 'type-nav') return toggleType();\n          if (id === 'host-nav') return nav.beginEdit('host');\n          if (id === 'port-nav') return nav.beginEdit('port');\n          if (id === 'username-nav') return nav.beginEdit('username');\n          if (id === 'password-nav') return nav.beginEdit('password');\n          if (id === 'enable-nav') return post('/api/config', {\n            enabled:true, type:type, host:element('host').value,\n            port:element('port').value, username:element('username').value,\n            password:element('password').value\n          });\n          if (id === 'disable-nav') return post('/api/config', { enabled:false });\n          if (id === 'refresh-nav') return location.reload();\n          if (id === 'tv-nav') {\n            if (!configured) return setState('Прокси не настроен. YouTube не будет открыт напрямую.');\n            return location.href = 'http://127.0.0.1:' + relayPort + '/tv';\n          }\n        },\n        onBack: function () {\n          if (testing) cancelTest();\n          history.back();\n        }\n      });\n      window.addEventListener('beforeunload', function () {\n        if (testing) cancelTest();\n      });\n    }());\n  </script>\n</body>\n</html>\n";
 var DEFAULT_PORT = 8113;
 var DEFAULT_SETTINGS_PORT = 8114;
 var MAX_TEXT = 16 * 1024 * 1024;
+var TEST_STAGE_TIMEOUT_MS = 9000;
+var TEST_TOTAL_TIMEOUT_MS = 40000;
+
+function testTimeoutCode(stage) {
+  if (stage === 'TCP') return 'TCP_TIMEOUT';
+  if (stage === 'AUTH') return 'AUTH_TIMEOUT';
+  if (stage === 'CONNECT' || stage === 'AUTH_CONNECT') return 'CONNECT_TIMEOUT';
+  if (stage === 'TLS') return 'TLS_TIMEOUT';
+  return 'HTTPS_TIMEOUT';
+}
 
 // Node 4.4.3 in older TizenBrew lacks Buffer.from/alloc and WHATWG URL.
 // Modern Node takes the non-deprecated branches; TV keeps the legacy branch.
@@ -101,9 +111,16 @@ function validateProxy(value) {
   return proxy;
 }
 
-function connectProxySocket(proxy, callback) {
-  var socket = net.connect(proxy.port, proxy.host);
+function connectProxySocket(proxy, callback, observer) {
+  var socket;
   var finished = false;
+  if (observer && observer.stage) observer.stage('TCP');
+  try { socket = net.connect(proxy.port, proxy.host); }
+  catch (ignored) {
+    process.nextTick(function () { callback(safeError('PROXY_CONNECT_FAILED')); });
+    return;
+  }
+  if (observer && observer.trackSocket) observer.trackSocket(socket);
   function finish(error, connected) {
     if (finished) return;
     finished = true;
@@ -114,7 +131,17 @@ function connectProxySocket(proxy, callback) {
     else socket.setTimeout(0);
     callback(error, connected);
   }
-  function onError() { finish(safeError('PROXY_CONNECT_FAILED')); }
+  function onError(error) {
+    var code = error && error.code;
+    if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+      return finish(safeError('PROXY_HOST_UNRESOLVED'));
+    }
+    if (code === 'ECONNREFUSED') return finish(safeError('PROXY_REFUSED'));
+    if (code === 'EHOSTUNREACH' || code === 'ENETUNREACH') {
+      return finish(safeError('PROXY_UNREACHABLE'));
+    }
+    finish(safeError('PROXY_CONNECT_FAILED'));
+  }
   function onTimeout() { finish(safeError('PROXY_TIMEOUT')); }
   function onClose() { finish(safeError('PROXY_EOF')); }
   socket.setTimeout(10000);
@@ -124,13 +151,16 @@ function connectProxySocket(proxy, callback) {
   socket.once('connect', function () { finish(null, socket); });
 }
 
-function openHttpTunnel(proxy, targetHost, targetPort, callback) {
+function openHttpTunnel(proxy, targetHost, targetPort, callback, observer) {
   connectProxySocket(proxy, function (error, socket) {
     var data = emptyBytes();
     var authority;
     var request;
     var done = false;
     if (error) return callback(error);
+    if (observer && observer.stage) {
+      observer.stage(proxy.username ? 'AUTH_CONNECT' : 'CONNECT');
+    }
     authority = targetHost + ':' + targetPort;
     request = 'CONNECT ' + authority + ' HTTP/1.1\r\n' +
       'Host: ' + authority + '\r\n';
@@ -187,10 +217,10 @@ function openHttpTunnel(proxy, targetHost, targetPort, callback) {
     socket.once('end', onEnd);
     socket.once('close', onEnd);
     socket.write(request);
-  });
+  }, observer);
 }
 
-function openSocksTunnel(proxy, targetHost, targetPort, callback) {
+function openSocksTunnel(proxy, targetHost, targetPort, callback, observer) {
   connectProxySocket(proxy, function (error, socket) {
     var buffer = emptyBytes();
     var wanted = 0;
@@ -247,6 +277,7 @@ function openSocksTunnel(proxy, targetHost, targetPort, callback) {
       pump();
     }
     function sendConnect() {
+      if (observer && observer.stage) observer.stage('CONNECT');
       var packet = Buffer.concat([
         bytes([5, 1, 0, 3, hostBytes.length]),
         hostBytes,
@@ -273,6 +304,7 @@ function openSocksTunnel(proxy, targetHost, targetPort, callback) {
     socket.once('timeout', onTimeout);
     socket.once('end', onEnd);
     socket.once('close', onEnd);
+    if (observer && observer.stage) observer.stage('AUTH');
     socket.write(bytes(username.length ? [5, 1, 2] : [5, 1, 0]));
     read(2, function (choice) {
       if (choice[0] !== 5) return finish(safeError('SOCKS_BAD_VERSION'));
@@ -292,26 +324,32 @@ function openSocksTunnel(proxy, targetHost, targetPort, callback) {
       if (choice[1] !== 0) return finish(safeError('SOCKS_NOAUTH_REJECTED'));
       sendConnect();
     });
-  });
+  }, observer);
 }
 
-function openTunnel(proxy, targetHost, targetPort, callback) {
+function openTunnel(proxy, targetHost, targetPort, callback, observer) {
   if (!proxy) return callback(safeError('PROXY_NOT_CONFIGURED'));
   if (proxy.type === 'http') {
-    openHttpTunnel(proxy, targetHost, targetPort, callback);
+    openHttpTunnel(proxy, targetHost, targetPort, callback, observer);
   } else if (proxy.type === 'socks5') {
-    openSocksTunnel(proxy, targetHost, targetPort, callback);
+    openSocksTunnel(proxy, targetHost, targetPort, callback, observer);
   } else {
     callback(safeError('INVALID_PROXY_TYPE'));
   }
 }
 
-function openVerifiedTls(socket, hostname, ca, callback) {
+function openVerifiedTls(socket, hostname, ca, callback, observer) {
   var options = { socket: socket, servername: hostname, rejectUnauthorized: true };
   var secure;
   var done = false;
   if (ca) options.ca = ca; // Test CA injection; verification remains enabled.
-  secure = tls.connect(options);
+  if (observer && observer.stage) observer.stage('TLS');
+  try { secure = tls.connect(options); }
+  catch (ignored) {
+    process.nextTick(function () { callback(safeError('TLS_SETUP_FAILED')); });
+    return;
+  }
+  if (observer && observer.trackSocket) observer.trackSocket(secure);
   function finish(error) {
     if (done) return;
     done = true;
@@ -337,49 +375,73 @@ function openVerifiedTls(socket, hostname, ca, callback) {
   });
 }
 
-function openOriginRequest(proxy, target, method, headers, ca, onResponse, onError) {
+function openOriginRequest(proxy, target, method, headers, ca,
+                           onResponse, onError, observer) {
   var parsed = parseUrl(target);
   var host = parsed.hostname;
   var request;
   var cancelled = false;
-  var socket = null;
+  var sockets = [];
+  var errorReported = false;
+  function reportError(error) {
+    if (cancelled || errorReported) return;
+    errorReported = true;
+    onError(error);
+  }
+  function trackSocket(socket) {
+    if (cancelled) return socket.destroy();
+    sockets.push(socket);
+  }
+  function stage(value) {
+    if (!cancelled && observer && observer.stage) observer.stage(value);
+  }
+  var transportObserver = { trackSocket: trackSocket, stage: stage };
   var wrapper = {
     writeFrom: function (incoming) {
       wrapper.incoming = incoming;
       if (request) incoming.pipe(request);
     },
     abort: function () {
+      if (cancelled) return;
       cancelled = true;
       if (request) request.abort();
-      if (socket) socket.destroy();
+      sockets.forEach(function (socket) { socket.destroy(); });
     }
   };
   if (parsed.protocol !== 'https:' || !allowedHost(host) ||
       (parsed.port && parsed.port !== '443') || parsed.auth) {
-    process.nextTick(function () { onError(safeError('TARGET_NOT_ALLOWED')); });
+    process.nextTick(function () { reportError(safeError('TARGET_NOT_ALLOWED')); });
     return wrapper;
   }
   openTunnel(proxy, host, 443, function (error, tunnel) {
-    if (error) return onError(error);
+    if (error) return reportError(error);
     if (cancelled) return tunnel.destroy();
-    socket = tunnel;
     openVerifiedTls(tunnel, host, ca, function (tlsError, secure) {
-      if (tlsError) return onError(tlsError);
+      if (tlsError) return reportError(tlsError);
       if (cancelled) return secure.destroy();
-      socket = secure;
       secure.setTimeout(120000, function () {
         secure.destroy(safeError('ORIGIN_IDLE_TIMEOUT'));
       });
-      request = https.request({
-        protocol: 'https:', hostname: host, port: 443,
-        path: parsed.path || '/', method: method, headers: headers,
-        agent: null, createConnection: function () { return secure; }
-      }, onResponse);
-      request.once('error', function () { onError(safeError('ORIGIN_REQUEST_FAILED')); });
+      stage('HTTPS');
+      try {
+        request = https.request({
+          protocol: 'https:', hostname: host, port: 443,
+          path: parsed.path || '/', method: method, headers: headers,
+          agent: null, createConnection: function () { return secure; }
+        }, function (upstream) {
+          if (cancelled) return upstream.resume();
+          onResponse(upstream);
+        });
+      } catch (ignored) {
+        return reportError(safeError('HTTPS_SETUP_FAILED'));
+      }
+      request.once('error', function () {
+        reportError(safeError('ORIGIN_REQUEST_FAILED'));
+      });
       if (wrapper.incoming) wrapper.incoming.pipe(request);
       else request.end();
-    });
-  });
+    }, transportObserver);
+  }, transportObserver);
   return wrapper;
 }
 
@@ -395,7 +457,9 @@ function routeTarget(pathname, rawUrl) {
       (parsed.search || '');
   }
   if (pathname === '/health' || pathname === '/client.js' ||
-      pathname === '/api/config' || pathname === '/api/test') return null;
+      pathname === '/api/config' || pathname === '/api/test' ||
+      pathname === '/api/test/status' ||
+      pathname === '/api/test/cancel') return null;
   return 'https://www.youtube.com' + pathname + (parsed.search || '');
 }
 
@@ -535,19 +599,27 @@ function settingsHtml(token, configured, stats, relayPort) {
     .replace(/@@VIDEO_REQUESTS@@/g, String(stats.videoRequests))
     .replace(/@@VIDEO_RANGE@@/g, String(stats.videoRangeRequests))
     .replace(/@@VIDEO_PARTIAL@@/g, String(stats.videoPartialResponses))
-    .replace(/@@VIDEO_BYTES@@/g, String(stats.videoBytes));
+    .replace(/@@VIDEO_BYTES@@/g, String(stats.videoBytes))
+    .replace(/@@TEST_ATTEMPTS@@/g, String(stats.testAttempts))
+    .replace(/@@TEST_SUCCESSES@@/g, String(stats.testSuccesses))
+    .replace(/@@TEST_ERRORS@@/g, String(stats.testErrors))
+    .replace(/@@TEST_CANCELLED@@/g, String(stats.testCancelled));
 }
 
 function createService(options) {
   options = options || {};
   var port = options.port || DEFAULT_PORT;
   var settingsPort = options.settingsPort || DEFAULT_SETTINGS_PORT;
+  var testStageTimeoutMs = options.testStageTimeoutMs || TEST_STAGE_TIMEOUT_MS;
+  var testTotalTimeoutMs = options.testTotalTimeoutMs || TEST_TOTAL_TIMEOUT_MS;
   var state = {
     proxy: options.proxy ? validateProxy(options.proxy) : null,
     token: crypto.randomBytes(24).toString('hex'),
     stats: { tunnels: 0, partialResponses: 0, rangeRequests: 0,
       videoRequests: 0, videoRangeRequests: 0, videoPartialResponses: 0,
-      videoBytes: 0, blockedRequests: 0, upstreamErrors: 0 }
+      videoBytes: 0, blockedRequests: 0, upstreamErrors: 0,
+      testAttempts: 0, testSuccesses: 0, testErrors: 0, testCancelled: 0 },
+    diagnostic: null
   };
   var server;
   var settingsServer;
@@ -556,6 +628,75 @@ function createService(options) {
     return request.headers['x-prototype-token'] === state.token &&
       (!request.headers.origin ||
        request.headers.origin === 'http://127.0.0.1:' + settingsPort);
+  }
+
+  function startDiagnostic(response) {
+    var settled = false;
+    var clientGone = false;
+    var target = null;
+    var stageTimer = null;
+    var totalTimer = null;
+    var diagnostic = { stage: 'TCP', startedAt: Date.now(), cancel: cancel };
+    state.diagnostic = diagnostic;
+    state.stats.testAttempts += 1;
+
+    function finish(status, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(stageTimer);
+      clearTimeout(totalTimer);
+      if (state.diagnostic === diagnostic) state.diagnostic = null;
+      if (status === 200) state.stats.testSuccesses += 1;
+      else if (value.error === 'CHECK_CANCELLED') state.stats.testCancelled += 1;
+      else state.stats.testErrors += 1;
+      if (target) target.abort();
+      if (!clientGone) {
+        try { sendJson(response, status, value); }
+        catch (ignored) { clientGone = true; }
+      }
+    }
+    function cancel() { finish(409, { error: 'CHECK_CANCELLED' }); }
+    function stage(next) {
+      if (settled) return;
+      diagnostic.stage = next;
+      clearTimeout(stageTimer);
+      stageTimer = setTimeout(function () {
+        finish(504, { error: testTimeoutCode(diagnostic.stage) });
+      }, testStageTimeoutMs);
+    }
+    response.once('close', function () {
+      if (settled) return;
+      clientGone = true;
+      cancel();
+    });
+    response.once('error', function () {
+      if (settled) return;
+      clientGone = true;
+      cancel();
+    });
+    totalTimer = setTimeout(function () {
+      finish(504, { error: 'CHECK_DEADLINE_EXCEEDED' });
+    }, testTotalTimeoutMs);
+    stage('TCP');
+    try {
+      target = openOriginRequest(state.proxy,
+        'https://www.youtube.com/generate_204', 'HEAD',
+        { host: 'www.youtube.com', connection: 'close' }, options.ca,
+        function (upstream) {
+          var status = upstream.statusCode;
+          upstream.resume();
+          if (status >= 200 && status < 300) {
+            finish(200, { reachable: true, status: status });
+          } else {
+            finish(502, { error: 'YOUTUBE_HTTP_STATUS', status: status || 0 });
+          }
+        }, function (failure) {
+          finish(502, { error: failure.code || 'UPSTREAM_FAILED' });
+        }, { stage: stage });
+      if (settled && target) target.abort();
+    } catch (ignored) {
+      finish(502, { error: 'CHECK_SETUP_FAILED' });
+    }
   }
 
   function relay(request, response, target) {
@@ -715,7 +856,7 @@ function createService(options) {
     }
     if (pathname === '/health' && request.method === 'GET') {
       return sendJson(response, 200, {
-        ready: true, version: '0.4.1-test.1',
+        ready: true, version: '0.4.2-test.1',
         configured: !!state.proxy, stats: state.stats
       }, { 'Access-Control-Allow-Origin': 'http://127.0.0.1:8081' });
     }
@@ -774,20 +915,28 @@ function createService(options) {
         sendJson(response, 200, { enabled: !!state.proxy });
       });
     }
+    if (pathname === '/api/test/status' && request.method === 'GET') {
+      if (!authorized(request)) return sendJson(response, 403, { error: 'FORBIDDEN' });
+      return sendJson(response, 200, {
+        active: !!state.diagnostic,
+        stage: state.diagnostic ? state.diagnostic.stage : 'IDLE',
+        elapsedMs: state.diagnostic ?
+          Date.now() - state.diagnostic.startedAt : 0
+      });
+    }
+    if (pathname === '/api/test/cancel' && request.method === 'POST') {
+      if (!authorized(request)) return sendJson(response, 403, { error: 'FORBIDDEN' });
+      var wasActive = !!state.diagnostic;
+      if (wasActive) state.diagnostic.cancel();
+      return sendJson(response, 200, { cancelled: wasActive });
+    }
     if (pathname === '/api/test' && request.method === 'POST') {
       if (!authorized(request)) return sendJson(response, 403, { error: 'FORBIDDEN' });
       if (!state.proxy) return sendJson(response, 503,
         { error: 'PROXY_NOT_CONFIGURED' });
-      target = openOriginRequest(state.proxy,
-        'https://www.youtube.com/generate_204', 'HEAD',
-        { host: 'www.youtube.com', connection: 'close' }, options.ca,
-        function (upstream) {
-          upstream.resume();
-          sendJson(response, 200, { reachable: true, status: upstream.statusCode });
-        }, function (failure) {
-          sendJson(response, 502, { reachable: false, error: failure.code });
-        });
-      return target;
+      if (state.diagnostic) return sendJson(response, 409,
+        { error: 'CHECK_ALREADY_RUNNING' });
+      return startDiagnostic(response);
     }
     sendJson(response, 404, { error: 'ROUTE_NOT_FOUND' });
   });

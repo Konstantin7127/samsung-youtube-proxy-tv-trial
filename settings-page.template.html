@@ -26,12 +26,15 @@
   <p id="state">@@STATUS@@</p>
   <p>Туннелей: @@TUNNELS@@; ответов 206: @@PARTIAL@@; ошибок: @@ERRORS@@; заблокировано: @@BLOCKED@@.</p>
   <p>googlevideo: запросов @@VIDEO_REQUESTS@@; Range @@VIDEO_RANGE@@; ответов 206 @@VIDEO_PARTIAL@@; байтов @@VIDEO_BYTES@@.</p>
+  <p>Проверки: всего @@TEST_ATTEMPTS@@; успешных @@TEST_SUCCESSES@@; ошибок @@TEST_ERRORS@@; отмен @@TEST_CANCELLED@@.</p>
   <div class="diag" aria-live="polite">
     <div id="script-status">JavaScript не запущен или заблокирован.</div>
     <div id="key-status">keydown: 0; последняя: —</div>
     <div id="no-key-status">Нажмите стрелку вниз.</div>
     <div id="focus-status">Выделение не установлено.</div>
     <div id="input-status">OK на поле открывает экранную клавиатуру.</div>
+    <div id="test-stage">Этап: проверка не запущена.</div>
+    <div id="test-time">Время проверки: 0 с.</div>
   </div>
   <p><small>Стрелки выбирают элемент, OK открывает поле, Back закрывает ввод или возвращает назад. При вводе IME управляет стрелками.</small></p>
   <div class="row"><button class="nav" id="type-nav" data-label="Тип прокси" type="button">Тип: HTTP CONNECT</button></div>
@@ -42,6 +45,7 @@
   <div class="row"><button class="nav" id="enable-nav" data-label="Включить прокси" type="button">Включить прокси</button></div>
   <div class="row"><button class="nav" id="disable-nav" data-label="Выключить прокси" type="button">Выключить прокси</button></div>
   <div class="row"><button class="nav" id="test-nav" data-label="Проверить прокси" type="button">Проверить подключение</button></div>
+  <div class="row"><button class="nav" id="cancel-nav" data-label="Отменить проверку" type="button">Отменить проверку</button></div>
   <div class="row"><button class="nav" id="refresh-nav" data-label="Обновить счётчики" type="button">Обновить счётчики</button></div>
   <div class="row"><button class="nav" id="tv-nav" data-label="Открыть YouTube TV" type="button">Открыть YouTube TV</button></div>
   <div class="row"><button class="nav" id="back-nav" data-label="Назад к проверке пульта" type="button">Назад к проверке пульта</button></div>
@@ -54,9 +58,53 @@
       var configured = @@CONFIGURED@@;
       var type = 'http';
       var nav;
+      var testing = false;
+      var testRequest = null;
+      var testTimer = null;
+      var testStarted = 0;
+      var statusPending = false;
       function element(id) { return document.getElementById(id); }
       function setState(message) { element('state').textContent = message; }
       function clearPassword() { element('password').value = ''; }
+      function setStage(value) { element('test-stage').textContent = 'Этап: ' + value + '.'; }
+      function stageName(value) {
+        if (value === 'TCP') return 'TCP-соединение с прокси';
+        if (value === 'AUTH') return 'авторизация прокси';
+        if (value === 'AUTH_CONNECT') return 'авторизация и HTTP CONNECT';
+        if (value === 'CONNECT') return 'CONNECT к YouTube';
+        if (value === 'TLS') return 'проверка TLS';
+        if (value === 'HTTPS') return 'ответ YouTube по HTTPS';
+        return 'ожидание';
+      }
+      function errorMessage(code) {
+        var messages = {
+          INVALID_PROXY_HOST:'Неверный формат адреса прокси.',
+          INVALID_PROXY_PORT:'Неверный номер порта.',
+          PROXY_HOST_UNRESOLVED:'Адрес прокси не найден. Проверьте адрес и DNS.',
+          PROXY_REFUSED:'Сервер отклонил TCP-соединение. Проверьте порт.',
+          PROXY_UNREACHABLE:'Сервер прокси недоступен из сети телевизора.',
+          PROXY_CONNECT_FAILED:'Не удалось подключиться к серверу прокси.',
+          TCP_TIMEOUT:'Истекло время TCP-соединения с прокси.',
+          PROXY_TIMEOUT:'Истекло время TCP-соединения с прокси.',
+          HTTP_PROXY_AUTH_REJECTED:'HTTP-прокси отклонил логин или пароль.',
+          SOCKS_AUTH_FAILED:'SOCKS5-прокси отклонил логин или пароль.',
+          SOCKS_AUTH_REQUIRED:'SOCKS5-прокси не принял способ авторизации.',
+          AUTH_TIMEOUT:'Истекло время авторизации прокси.',
+          HTTP_PROXY_CONNECT_REJECTED:'HTTP CONNECT отклонён прокси.',
+          SOCKS_CONNECT_REJECTED:'SOCKS5 CONNECT отклонён прокси.',
+          CONNECT_TIMEOUT:'Истекло время ответа прокси на CONNECT.',
+          TLS_VERIFICATION_FAILED:'Не прошла проверка TLS-сертификата YouTube.',
+          TLS_TIMEOUT:'Истекло время проверки TLS.',
+          HTTPS_TIMEOUT:'Истекло время ответа YouTube по HTTPS.',
+          YOUTUBE_HTTP_STATUS:'YouTube ответил с ошибкой HTTP.',
+          CHECK_DEADLINE_EXCEEDED:'Превышено общее время проверки.',
+          CHECK_CANCELLED:'Проверка отменена пользователем.',
+          CHECK_ALREADY_RUNNING:'Проверка уже выполняется.',
+          PROXY_NOT_CONFIGURED:'Прокси не настроен.',
+          LOCAL_SERVICE_UNAVAILABLE:'Локальный сервис недоступен.'
+        };
+        return (messages[code] || 'Проверка не прошла.') + ' [' + code + ']';
+      }
       function safeError(text) {
         try {
           var parsed = JSON.parse(text);
@@ -73,14 +121,10 @@
         xhr.onload = function () {
           clearPassword();
           if (xhr.status === 200) {
-            if (path === '/api/config') {
-              configured = !!payload.enabled;
-              setState(configured ? 'Прокси включён в памяти сервиса.' : 'Прокси выключен. YouTube не будет открыт напрямую.');
-            } else {
-              setState('Проверка прошла. Сервер YouTube ответил через прокси.');
-            }
+            configured = !!payload.enabled;
+            setState(configured ? 'Прокси включён в памяти сервиса.' : 'Прокси выключен. YouTube не будет открыт напрямую.');
           } else {
-            setState('Операция не прошла: ' + safeError(xhr.responseText) + ' (HTTP ' + xhr.status + ').');
+            setState(errorMessage(safeError(xhr.responseText)));
           }
         };
         xhr.onerror = xhr.ontimeout = function () {
@@ -89,20 +133,115 @@
         };
         xhr.send(JSON.stringify(payload));
       }
+      function cancelServer() {
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/test/cancel', true);
+        xhr.timeout = 2000;
+        xhr.setRequestHeader('X-Prototype-Token', token);
+        xhr.onerror = xhr.ontimeout = function () {};
+        xhr.send('{}');
+      }
+      function stopTestUi() {
+        testing = false;
+        clearInterval(testTimer);
+        testTimer = null;
+        testRequest = null;
+      }
+      function pollStage() {
+        var xhr;
+        if (!testing || statusPending) return;
+        statusPending = true;
+        xhr = new XMLHttpRequest();
+        xhr.open('GET', '/api/test/status', true);
+        xhr.timeout = 2000;
+        xhr.setRequestHeader('X-Prototype-Token', token);
+        xhr.onload = function () {
+          statusPending = false;
+          if (!testing || xhr.status !== 200) return;
+          try {
+            var result = JSON.parse(xhr.responseText);
+            if (result.active) setStage(stageName(result.stage));
+          } catch (ignored) {}
+        };
+        xhr.onerror = xhr.ontimeout = function () { statusPending = false; };
+        xhr.send();
+      }
+      function startTest() {
+        var xhr;
+        if (testing) return setState('Проверка уже выполняется.');
+        if (!configured) return setState('Сначала включите прокси.');
+        testing = true;
+        testStarted = Date.now();
+        setState('Проверка соединения. Пульт остаётся доступным.');
+        setStage(stageName('TCP'));
+        element('test-time').textContent = 'Время проверки: 0 с.';
+        testTimer = setInterval(function () {
+          if (!testing) return;
+          element('test-time').textContent = 'Время проверки: ' +
+            Math.floor((Date.now() - testStarted) / 1000) + ' с.';
+          pollStage();
+        }, 1000);
+        xhr = new XMLHttpRequest();
+        testRequest = xhr;
+        xhr.open('POST', '/api/test', true);
+        xhr.timeout = 45000;
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.setRequestHeader('X-Prototype-Token', token);
+        xhr.onload = function () {
+          var code;
+          if (!testing) return;
+          stopTestUi();
+          if (xhr.status === 200) {
+            setStage('завершено');
+            setState('Проверка прошла: YouTube ответил через прокси.');
+          } else {
+            code = safeError(xhr.responseText);
+            setStage('ошибка');
+            setState(errorMessage(code));
+          }
+        };
+        xhr.onerror = xhr.ontimeout = function () {
+          if (!testing) return;
+          stopTestUi();
+          setStage('сервис недоступен');
+          setState(errorMessage('LOCAL_SERVICE_UNAVAILABLE'));
+          cancelServer();
+        };
+        xhr.send('{}');
+        pollStage();
+      }
+      function cancelTest() {
+        var xhr = testRequest;
+        if (!testing) return setState('Сейчас нет активной проверки.');
+        stopTestUi();
+        if (xhr) xhr.abort();
+        cancelServer();
+        setStage('отменено');
+        setState(errorMessage('CHECK_CANCELLED'));
+      }
       function toggleType() {
         type = type === 'http' ? 'socks5' : 'http';
         element('type-nav').textContent = 'Тип: ' + (type === 'http' ? 'HTTP CONNECT' : 'SOCKS5');
       }
       nav = createRemoteNavigation({
         ids: ['type-nav', 'host-nav', 'port-nav', 'username-nav', 'password-nav',
-          'enable-nav', 'disable-nav', 'test-nav', 'refresh-nav', 'tv-nav', 'back-nav'],
+          'enable-nav', 'disable-nav', 'test-nav', 'cancel-nav',
+          'refresh-nav', 'tv-nav', 'back-nav'],
         inputIds: ['host', 'port', 'username', 'password'],
         onHorizontal: function (id) {
+          if (testing && id === 'type-nav') return true;
           if (id !== 'type-nav') return false;
           toggleType();
           return true;
         },
         onActivate: function (id) {
+          if (id === 'cancel-nav') return cancelTest();
+          if (id === 'test-nav') return startTest();
+          if (id === 'back-nav') {
+            if (testing) cancelTest();
+            return history.back();
+          }
+          if (testing) return setState('Проверка идёт. Доступна кнопка «Отменить проверку».');
           if (id === 'type-nav') return toggleType();
           if (id === 'host-nav') return nav.beginEdit('host');
           if (id === 'port-nav') return nav.beginEdit('port');
@@ -114,15 +253,19 @@
             password:element('password').value
           });
           if (id === 'disable-nav') return post('/api/config', { enabled:false });
-          if (id === 'test-nav') return post('/api/test', {});
           if (id === 'refresh-nav') return location.reload();
           if (id === 'tv-nav') {
             if (!configured) return setState('Прокси не настроен. YouTube не будет открыт напрямую.');
             return location.href = 'http://127.0.0.1:' + relayPort + '/tv';
           }
-          if (id === 'back-nav') return history.back();
         },
-        onBack: function () { history.back(); }
+        onBack: function () {
+          if (testing) cancelTest();
+          history.back();
+        }
+      });
+      window.addEventListener('beforeunload', function () {
+        if (testing) cancelTest();
       });
     }());
   </script>

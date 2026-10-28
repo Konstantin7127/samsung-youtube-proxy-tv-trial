@@ -14,6 +14,16 @@ var SETTINGS_PAGE = /*__SETTINGS_PAGE__*/;
 var DEFAULT_PORT = 8113;
 var DEFAULT_SETTINGS_PORT = 8114;
 var MAX_TEXT = 16 * 1024 * 1024;
+var TEST_STAGE_TIMEOUT_MS = 9000;
+var TEST_TOTAL_TIMEOUT_MS = 40000;
+
+function testTimeoutCode(stage) {
+  if (stage === 'TCP') return 'TCP_TIMEOUT';
+  if (stage === 'AUTH') return 'AUTH_TIMEOUT';
+  if (stage === 'CONNECT' || stage === 'AUTH_CONNECT') return 'CONNECT_TIMEOUT';
+  if (stage === 'TLS') return 'TLS_TIMEOUT';
+  return 'HTTPS_TIMEOUT';
+}
 
 // Node 4.4.3 in older TizenBrew lacks Buffer.from/alloc and WHATWG URL.
 // Modern Node takes the non-deprecated branches; TV keeps the legacy branch.
@@ -101,9 +111,16 @@ function validateProxy(value) {
   return proxy;
 }
 
-function connectProxySocket(proxy, callback) {
-  var socket = net.connect(proxy.port, proxy.host);
+function connectProxySocket(proxy, callback, observer) {
+  var socket;
   var finished = false;
+  if (observer && observer.stage) observer.stage('TCP');
+  try { socket = net.connect(proxy.port, proxy.host); }
+  catch (ignored) {
+    process.nextTick(function () { callback(safeError('PROXY_CONNECT_FAILED')); });
+    return;
+  }
+  if (observer && observer.trackSocket) observer.trackSocket(socket);
   function finish(error, connected) {
     if (finished) return;
     finished = true;
@@ -114,7 +131,17 @@ function connectProxySocket(proxy, callback) {
     else socket.setTimeout(0);
     callback(error, connected);
   }
-  function onError() { finish(safeError('PROXY_CONNECT_FAILED')); }
+  function onError(error) {
+    var code = error && error.code;
+    if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+      return finish(safeError('PROXY_HOST_UNRESOLVED'));
+    }
+    if (code === 'ECONNREFUSED') return finish(safeError('PROXY_REFUSED'));
+    if (code === 'EHOSTUNREACH' || code === 'ENETUNREACH') {
+      return finish(safeError('PROXY_UNREACHABLE'));
+    }
+    finish(safeError('PROXY_CONNECT_FAILED'));
+  }
   function onTimeout() { finish(safeError('PROXY_TIMEOUT')); }
   function onClose() { finish(safeError('PROXY_EOF')); }
   socket.setTimeout(10000);
@@ -124,13 +151,16 @@ function connectProxySocket(proxy, callback) {
   socket.once('connect', function () { finish(null, socket); });
 }
 
-function openHttpTunnel(proxy, targetHost, targetPort, callback) {
+function openHttpTunnel(proxy, targetHost, targetPort, callback, observer) {
   connectProxySocket(proxy, function (error, socket) {
     var data = emptyBytes();
     var authority;
     var request;
     var done = false;
     if (error) return callback(error);
+    if (observer && observer.stage) {
+      observer.stage(proxy.username ? 'AUTH_CONNECT' : 'CONNECT');
+    }
     authority = targetHost + ':' + targetPort;
     request = 'CONNECT ' + authority + ' HTTP/1.1\r\n' +
       'Host: ' + authority + '\r\n';
@@ -187,10 +217,10 @@ function openHttpTunnel(proxy, targetHost, targetPort, callback) {
     socket.once('end', onEnd);
     socket.once('close', onEnd);
     socket.write(request);
-  });
+  }, observer);
 }
 
-function openSocksTunnel(proxy, targetHost, targetPort, callback) {
+function openSocksTunnel(proxy, targetHost, targetPort, callback, observer) {
   connectProxySocket(proxy, function (error, socket) {
     var buffer = emptyBytes();
     var wanted = 0;
@@ -247,6 +277,7 @@ function openSocksTunnel(proxy, targetHost, targetPort, callback) {
       pump();
     }
     function sendConnect() {
+      if (observer && observer.stage) observer.stage('CONNECT');
       var packet = Buffer.concat([
         bytes([5, 1, 0, 3, hostBytes.length]),
         hostBytes,
@@ -273,6 +304,7 @@ function openSocksTunnel(proxy, targetHost, targetPort, callback) {
     socket.once('timeout', onTimeout);
     socket.once('end', onEnd);
     socket.once('close', onEnd);
+    if (observer && observer.stage) observer.stage('AUTH');
     socket.write(bytes(username.length ? [5, 1, 2] : [5, 1, 0]));
     read(2, function (choice) {
       if (choice[0] !== 5) return finish(safeError('SOCKS_BAD_VERSION'));
@@ -292,26 +324,32 @@ function openSocksTunnel(proxy, targetHost, targetPort, callback) {
       if (choice[1] !== 0) return finish(safeError('SOCKS_NOAUTH_REJECTED'));
       sendConnect();
     });
-  });
+  }, observer);
 }
 
-function openTunnel(proxy, targetHost, targetPort, callback) {
+function openTunnel(proxy, targetHost, targetPort, callback, observer) {
   if (!proxy) return callback(safeError('PROXY_NOT_CONFIGURED'));
   if (proxy.type === 'http') {
-    openHttpTunnel(proxy, targetHost, targetPort, callback);
+    openHttpTunnel(proxy, targetHost, targetPort, callback, observer);
   } else if (proxy.type === 'socks5') {
-    openSocksTunnel(proxy, targetHost, targetPort, callback);
+    openSocksTunnel(proxy, targetHost, targetPort, callback, observer);
   } else {
     callback(safeError('INVALID_PROXY_TYPE'));
   }
 }
 
-function openVerifiedTls(socket, hostname, ca, callback) {
+function openVerifiedTls(socket, hostname, ca, callback, observer) {
   var options = { socket: socket, servername: hostname, rejectUnauthorized: true };
   var secure;
   var done = false;
   if (ca) options.ca = ca; // Test CA injection; verification remains enabled.
-  secure = tls.connect(options);
+  if (observer && observer.stage) observer.stage('TLS');
+  try { secure = tls.connect(options); }
+  catch (ignored) {
+    process.nextTick(function () { callback(safeError('TLS_SETUP_FAILED')); });
+    return;
+  }
+  if (observer && observer.trackSocket) observer.trackSocket(secure);
   function finish(error) {
     if (done) return;
     done = true;
@@ -337,49 +375,73 @@ function openVerifiedTls(socket, hostname, ca, callback) {
   });
 }
 
-function openOriginRequest(proxy, target, method, headers, ca, onResponse, onError) {
+function openOriginRequest(proxy, target, method, headers, ca,
+                           onResponse, onError, observer) {
   var parsed = parseUrl(target);
   var host = parsed.hostname;
   var request;
   var cancelled = false;
-  var socket = null;
+  var sockets = [];
+  var errorReported = false;
+  function reportError(error) {
+    if (cancelled || errorReported) return;
+    errorReported = true;
+    onError(error);
+  }
+  function trackSocket(socket) {
+    if (cancelled) return socket.destroy();
+    sockets.push(socket);
+  }
+  function stage(value) {
+    if (!cancelled && observer && observer.stage) observer.stage(value);
+  }
+  var transportObserver = { trackSocket: trackSocket, stage: stage };
   var wrapper = {
     writeFrom: function (incoming) {
       wrapper.incoming = incoming;
       if (request) incoming.pipe(request);
     },
     abort: function () {
+      if (cancelled) return;
       cancelled = true;
       if (request) request.abort();
-      if (socket) socket.destroy();
+      sockets.forEach(function (socket) { socket.destroy(); });
     }
   };
   if (parsed.protocol !== 'https:' || !allowedHost(host) ||
       (parsed.port && parsed.port !== '443') || parsed.auth) {
-    process.nextTick(function () { onError(safeError('TARGET_NOT_ALLOWED')); });
+    process.nextTick(function () { reportError(safeError('TARGET_NOT_ALLOWED')); });
     return wrapper;
   }
   openTunnel(proxy, host, 443, function (error, tunnel) {
-    if (error) return onError(error);
+    if (error) return reportError(error);
     if (cancelled) return tunnel.destroy();
-    socket = tunnel;
     openVerifiedTls(tunnel, host, ca, function (tlsError, secure) {
-      if (tlsError) return onError(tlsError);
+      if (tlsError) return reportError(tlsError);
       if (cancelled) return secure.destroy();
-      socket = secure;
       secure.setTimeout(120000, function () {
         secure.destroy(safeError('ORIGIN_IDLE_TIMEOUT'));
       });
-      request = https.request({
-        protocol: 'https:', hostname: host, port: 443,
-        path: parsed.path || '/', method: method, headers: headers,
-        agent: null, createConnection: function () { return secure; }
-      }, onResponse);
-      request.once('error', function () { onError(safeError('ORIGIN_REQUEST_FAILED')); });
+      stage('HTTPS');
+      try {
+        request = https.request({
+          protocol: 'https:', hostname: host, port: 443,
+          path: parsed.path || '/', method: method, headers: headers,
+          agent: null, createConnection: function () { return secure; }
+        }, function (upstream) {
+          if (cancelled) return upstream.resume();
+          onResponse(upstream);
+        });
+      } catch (ignored) {
+        return reportError(safeError('HTTPS_SETUP_FAILED'));
+      }
+      request.once('error', function () {
+        reportError(safeError('ORIGIN_REQUEST_FAILED'));
+      });
       if (wrapper.incoming) wrapper.incoming.pipe(request);
       else request.end();
-    });
-  });
+    }, transportObserver);
+  }, transportObserver);
   return wrapper;
 }
 
@@ -395,7 +457,9 @@ function routeTarget(pathname, rawUrl) {
       (parsed.search || '');
   }
   if (pathname === '/health' || pathname === '/client.js' ||
-      pathname === '/api/config' || pathname === '/api/test') return null;
+      pathname === '/api/config' || pathname === '/api/test' ||
+      pathname === '/api/test/status' ||
+      pathname === '/api/test/cancel') return null;
   return 'https://www.youtube.com' + pathname + (parsed.search || '');
 }
 
@@ -535,19 +599,27 @@ function settingsHtml(token, configured, stats, relayPort) {
     .replace(/@@VIDEO_REQUESTS@@/g, String(stats.videoRequests))
     .replace(/@@VIDEO_RANGE@@/g, String(stats.videoRangeRequests))
     .replace(/@@VIDEO_PARTIAL@@/g, String(stats.videoPartialResponses))
-    .replace(/@@VIDEO_BYTES@@/g, String(stats.videoBytes));
+    .replace(/@@VIDEO_BYTES@@/g, String(stats.videoBytes))
+    .replace(/@@TEST_ATTEMPTS@@/g, String(stats.testAttempts))
+    .replace(/@@TEST_SUCCESSES@@/g, String(stats.testSuccesses))
+    .replace(/@@TEST_ERRORS@@/g, String(stats.testErrors))
+    .replace(/@@TEST_CANCELLED@@/g, String(stats.testCancelled));
 }
 
 function createService(options) {
   options = options || {};
   var port = options.port || DEFAULT_PORT;
   var settingsPort = options.settingsPort || DEFAULT_SETTINGS_PORT;
+  var testStageTimeoutMs = options.testStageTimeoutMs || TEST_STAGE_TIMEOUT_MS;
+  var testTotalTimeoutMs = options.testTotalTimeoutMs || TEST_TOTAL_TIMEOUT_MS;
   var state = {
     proxy: options.proxy ? validateProxy(options.proxy) : null,
     token: crypto.randomBytes(24).toString('hex'),
     stats: { tunnels: 0, partialResponses: 0, rangeRequests: 0,
       videoRequests: 0, videoRangeRequests: 0, videoPartialResponses: 0,
-      videoBytes: 0, blockedRequests: 0, upstreamErrors: 0 }
+      videoBytes: 0, blockedRequests: 0, upstreamErrors: 0,
+      testAttempts: 0, testSuccesses: 0, testErrors: 0, testCancelled: 0 },
+    diagnostic: null
   };
   var server;
   var settingsServer;
@@ -556,6 +628,75 @@ function createService(options) {
     return request.headers['x-prototype-token'] === state.token &&
       (!request.headers.origin ||
        request.headers.origin === 'http://127.0.0.1:' + settingsPort);
+  }
+
+  function startDiagnostic(response) {
+    var settled = false;
+    var clientGone = false;
+    var target = null;
+    var stageTimer = null;
+    var totalTimer = null;
+    var diagnostic = { stage: 'TCP', startedAt: Date.now(), cancel: cancel };
+    state.diagnostic = diagnostic;
+    state.stats.testAttempts += 1;
+
+    function finish(status, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(stageTimer);
+      clearTimeout(totalTimer);
+      if (state.diagnostic === diagnostic) state.diagnostic = null;
+      if (status === 200) state.stats.testSuccesses += 1;
+      else if (value.error === 'CHECK_CANCELLED') state.stats.testCancelled += 1;
+      else state.stats.testErrors += 1;
+      if (target) target.abort();
+      if (!clientGone) {
+        try { sendJson(response, status, value); }
+        catch (ignored) { clientGone = true; }
+      }
+    }
+    function cancel() { finish(409, { error: 'CHECK_CANCELLED' }); }
+    function stage(next) {
+      if (settled) return;
+      diagnostic.stage = next;
+      clearTimeout(stageTimer);
+      stageTimer = setTimeout(function () {
+        finish(504, { error: testTimeoutCode(diagnostic.stage) });
+      }, testStageTimeoutMs);
+    }
+    response.once('close', function () {
+      if (settled) return;
+      clientGone = true;
+      cancel();
+    });
+    response.once('error', function () {
+      if (settled) return;
+      clientGone = true;
+      cancel();
+    });
+    totalTimer = setTimeout(function () {
+      finish(504, { error: 'CHECK_DEADLINE_EXCEEDED' });
+    }, testTotalTimeoutMs);
+    stage('TCP');
+    try {
+      target = openOriginRequest(state.proxy,
+        'https://www.youtube.com/generate_204', 'HEAD',
+        { host: 'www.youtube.com', connection: 'close' }, options.ca,
+        function (upstream) {
+          var status = upstream.statusCode;
+          upstream.resume();
+          if (status >= 200 && status < 300) {
+            finish(200, { reachable: true, status: status });
+          } else {
+            finish(502, { error: 'YOUTUBE_HTTP_STATUS', status: status || 0 });
+          }
+        }, function (failure) {
+          finish(502, { error: failure.code || 'UPSTREAM_FAILED' });
+        }, { stage: stage });
+      if (settled && target) target.abort();
+    } catch (ignored) {
+      finish(502, { error: 'CHECK_SETUP_FAILED' });
+    }
   }
 
   function relay(request, response, target) {
@@ -715,7 +856,7 @@ function createService(options) {
     }
     if (pathname === '/health' && request.method === 'GET') {
       return sendJson(response, 200, {
-        ready: true, version: '0.4.1-test.1',
+        ready: true, version: '0.4.2-test.1',
         configured: !!state.proxy, stats: state.stats
       }, { 'Access-Control-Allow-Origin': 'http://127.0.0.1:8081' });
     }
@@ -774,20 +915,28 @@ function createService(options) {
         sendJson(response, 200, { enabled: !!state.proxy });
       });
     }
+    if (pathname === '/api/test/status' && request.method === 'GET') {
+      if (!authorized(request)) return sendJson(response, 403, { error: 'FORBIDDEN' });
+      return sendJson(response, 200, {
+        active: !!state.diagnostic,
+        stage: state.diagnostic ? state.diagnostic.stage : 'IDLE',
+        elapsedMs: state.diagnostic ?
+          Date.now() - state.diagnostic.startedAt : 0
+      });
+    }
+    if (pathname === '/api/test/cancel' && request.method === 'POST') {
+      if (!authorized(request)) return sendJson(response, 403, { error: 'FORBIDDEN' });
+      var wasActive = !!state.diagnostic;
+      if (wasActive) state.diagnostic.cancel();
+      return sendJson(response, 200, { cancelled: wasActive });
+    }
     if (pathname === '/api/test' && request.method === 'POST') {
       if (!authorized(request)) return sendJson(response, 403, { error: 'FORBIDDEN' });
       if (!state.proxy) return sendJson(response, 503,
         { error: 'PROXY_NOT_CONFIGURED' });
-      target = openOriginRequest(state.proxy,
-        'https://www.youtube.com/generate_204', 'HEAD',
-        { host: 'www.youtube.com', connection: 'close' }, options.ca,
-        function (upstream) {
-          upstream.resume();
-          sendJson(response, 200, { reachable: true, status: upstream.statusCode });
-        }, function (failure) {
-          sendJson(response, 502, { reachable: false, error: failure.code });
-        });
-      return target;
+      if (state.diagnostic) return sendJson(response, 409,
+        { error: 'CHECK_ALREADY_RUNNING' });
+      return startDiagnostic(response);
     }
     sendJson(response, 404, { error: 'ROUTE_NOT_FOUND' });
   });

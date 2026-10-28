@@ -1,8 +1,8 @@
 {
   "name": "samsung-youtube-proxy-tv-trial",
-  "version": "0.4.1-test.1",
+  "version": "0.4.2-test.1",
   "private": true,
-  "description": "Remote-control diagnostic trial with volatile proxy credentials",
+  "description": "Cancelable proxy connection diagnostics with volatile credentials",
   "appName": "YouTube Proxy Remote Trial",
   "packageType": "app",
   "appPath": "bootstrap.html",
